@@ -1,0 +1,374 @@
+/*
+ * author @ Stewart Mangezi
+ * Embedded Systems Final Project Code
+ * 
+ * 
+ */
+ 
+//----------------------------------------------------------------------------------------------------------------------------
+/* Libraries Used: These are borrowed from the system and modified for use in code below*/
+
+#include <SoftwareSerial.h>
+#include <TinyGPS.h>
+#include <DFRobot_sim808.h>
+#include <LiquidCrystal_I2C.h>
+#include <NewPing.h>
+
+//----------------------------------------------------------------------------------------------------------------------------
+/* Definations of variables to replace some constants in code for easier code reading */
+#define MESSAGE_LENGTH 160
+#define PIN_TX    10
+#define PIN_RX    11
+#define trigPin    2
+#define echoPin    3
+#define redLED     4
+#define buzzer     5
+#define setLED     6
+#define buzz_freq  1000
+#define PHONE_N   "+250*********" //Replace "*********" with phone number
+#define MAX_DISTANCE 400
+#define mindist    20             // Collision distance 
+#define middist    150            // Collision warning distance
+#define thresh      1             // Threshold distance value limiting the system 
+
+//----------------------------------------------------------------------------------------------------------------------------
+/*Variable Declarations*/
+char message[MESSAGE_LENGTH];
+int messageIndex = 0;
+char MESSAGE[300];
+char lat[12];
+char lon[12];
+char wspeed[12];
+char phone[16];
+char datetime[24];
+long duration;
+int distance;
+
+int set = 0; //Limits emergency sms send to one
+int mm = 0; // Time for system to settle 
+
+//----------------------------------------------------------------------------------------------------------------------------
+/*Calling the Tiny gps from library; setting the system serial and the SIM808*/
+
+LiquidCrystal_I2C lcd(0x27,20,4);
+TinyGPS gps;
+SoftwareSerial ss(PIN_TX, PIN_RX );
+DFRobot_SIM808 sim808(&ss);//Connect RX,TX,PWR,
+NewPing sonar = NewPing(trigPin, echoPin, MAX_DISTANCE);
+
+//----------------------------------------------------------------------------------------------------------------------------
+/*Static functions declared for the Tiny GPS library as used for the Examples*/
+static void smartdelay(unsigned long ms);
+static void print_float(float val, float invalid, int len, int prec);
+static void print_int(unsigned long val, unsigned long invalid, int len);
+static void print_date(TinyGPS &gps);
+static void print_str(const char *str, int len);
+
+void setup()
+{
+  //******** Define inputs and outputs  *************
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(buzzer, OUTPUT);
+  pinMode(redLED, OUTPUT);
+  pinMode(setLED, OUTPUT);
+  
+  //************************ Initialize Serials *****************************
+  Serial.begin(9600);
+  ss.begin(9600);
+
+  
+  //************************ Initialize LCD *************************************
+  lcd.init(); 
+  lcd.backlight();
+  lcd.setCursor(0,0);
+  lcd.print("System Starting");
+
+  //************************ Initialize sim808 module *****************************
+  while(!sim808.init())
+  {
+      Serial.print("Sim808 init error\r\n");
+      delay(1000);
+  }
+  delay(3000);
+
+  if( sim808.attachGPS())
+      Serial.println("GPS power success");
+  else 
+      Serial.println("Open the GPS power failure");
+      
+  Serial.println("Start System:\n");
+
+  //************************ Confirm System IS Operational *****************************
+  lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("System Active");
+  digitalWrite(setLED, 1);
+  digitalWrite(buzzer, 1);
+  delay(1000);
+  digitalWrite(setLED, 0);
+  digitalWrite(buzzer, 0);
+  
+  //************************ Initialize gps  *************************************
+  Serial.print("Testing TinyGPS library v. "); Serial.println(TinyGPS::library_version());
+  Serial.println("by Mikal Hart & Adapted by Stewart Mangezi");
+  Serial.println();
+  Serial.println("Sats HDOP Latitude  Longitude  Fix  Date       Time     Date Alt    Course Speed Card  Distance Course Card  Chars Sentences Checksum");
+  Serial.println("          (deg)     (deg)      Age                      Age  (m)    --- from GPS ----  ---- to London  ----  RX    RX        Fail");
+  Serial.println("-------------------------------------------------------------------------------------------------------------------------------------");
+
+}
+
+void loop()
+{
+  //************************ Find Location Using Example ************************
+  float flat, flon;
+  unsigned long age, date, time, chars = 0;
+  unsigned short sentences = 0, failed = 0;
+  static const double LONDON_LAT = 51.508131, LONDON_LON = -0.128002;
+  
+  print_int(gps.satellites(), TinyGPS::GPS_INVALID_SATELLITES, 5);
+  print_int(gps.hdop(), TinyGPS::GPS_INVALID_HDOP, 5);
+  gps.f_get_position(&flat, &flon, &age);
+  print_float(flat, TinyGPS::GPS_INVALID_F_ANGLE, 10, 6);
+  print_float(flon, TinyGPS::GPS_INVALID_F_ANGLE, 11, 6);
+  print_int(age, TinyGPS::GPS_INVALID_AGE, 5);
+  print_date(gps);
+  print_float(gps.f_altitude(), TinyGPS::GPS_INVALID_F_ALTITUDE, 7, 2);
+  print_float(gps.f_course(), TinyGPS::GPS_INVALID_F_ANGLE, 7, 2);
+  print_float(gps.f_speed_kmph(), TinyGPS::GPS_INVALID_F_SPEED, 6, 2);
+  print_str(gps.f_course() == TinyGPS::GPS_INVALID_F_ANGLE ? "*** " : TinyGPS::cardinal(gps.f_course()), 6);
+  print_int(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0xFFFFFFFF : (unsigned long)TinyGPS::distance_between(flat, flon, LONDON_LAT, LONDON_LON) / 1000, 0xFFFFFFFF, 9);
+  print_float(flat == TinyGPS::GPS_INVALID_F_ANGLE ? TinyGPS::GPS_INVALID_F_ANGLE : TinyGPS::course_to(flat, flon, LONDON_LAT, LONDON_LON), TinyGPS::GPS_INVALID_F_ANGLE, 7, 2);
+  print_str(flat == TinyGPS::GPS_INVALID_F_ANGLE ? "*** " : TinyGPS::cardinal(TinyGPS::course_to(flat, flon, LONDON_LAT, LONDON_LON)), 6);
+
+  gps.stats(&chars, &sentences, &failed);
+  print_int(chars, 0xFFFFFFFF, 6);
+  print_int(sentences, 0xFFFFFFFF, 10);
+  print_int(failed, 0xFFFFFFFF, 9);
+  Serial.println();
+  
+ //************************ System Operation ********************************
+  //Allow system to settle
+  if(mm<5){
+    mm=mm+1;
+  }
+
+  
+ 
+  if(mm==5){
+     //Finds location of vehicle on request
+    findCar(flat,flon);
+    
+    // Collission avoidance system that warns driver and also manages the coliisions
+    collision_system(flat, flon);
+  }
+  smartdelay(1000);
+  
+}
+
+//************************ Functions ************************************************
+
+//Function Sends Location as sms in response to a request. Takes the latitude and longitude as inputs.
+void sendLocation(float flat, float flon)
+{
+  dtostrf(flat, 6, 3, lat); //put float value of la into char array of lat. 6 = number of digits before decimal sign. 3 = number of digits after the decimal sign.
+  dtostrf(flon, 6, 3, lon); //put float value of lo into char array of lon
+  sprintf(MESSAGE, "Car Location: \nLatitude : %s\nLongitude : %s\nLocation Link.\nhttp://maps.google.com/maps?q=%s,%s\n", lat, lon, lat, lon);
+  Serial.println("Sim808 init success");
+  Serial.println("Start to send message ...");
+  Serial.println(MESSAGE);
+  Serial.print("Message send to: ");
+  Serial.println(PHONE_N);
+  sim808.sendSMS(PHONE_N,MESSAGE);
+}
+
+//Function Sends Location as sms and calls the emergency phone number in response to a collision. Takes the latitude and longitude as inputs.
+void sendEmergeny(float flat, float flon)
+{
+  dtostrf(flat, 6, 3, lat); //put float value of la into char array of lat. 6 = number of digits before decimal sign. 3 = number of digits after the decimal sign.
+  dtostrf(flon, 6, 3, lon); //put float value of lo into char array of lon
+  sprintf(MESSAGE, "Collision at: \nLatitude : %s\nLongitude : %s\nLocation Link.\nhttp://maps.google.com/maps?q=%s,%s\n", lat, lon, lat, lon);
+  Serial.println("Sim808 init success");
+  Serial.println("Start to send message ...");
+  Serial.println(MESSAGE);
+  Serial.print("Message send to: ");
+  Serial.println(PHONE_N);
+  //sim808.sendSMS(PHONE_N,MESSAGE);//
+  sim808.callUp(PHONE_N);
+}
+
+//Function Sends Location as sms  in response to a a request. It checks the SIMCARD inbox for new requests, deletes message to avoid 
+//filling the inbox. Takes the latitude and longitude as inputs.
+void findCar(float flat, float flon)
+{
+  //*********** Detecting unread SMS ************************
+   messageIndex = sim808.isSMSunread();
+  if (messageIndex > 0)
+   { 
+      Serial.print("messageIndex: ");
+      Serial.println(messageIndex);
+      sim808.readSMS(messageIndex, message, MESSAGE_LENGTH, phone, datetime);
+      sim808.deleteSMS(messageIndex); // Delete sms to avoid filling sim memory
+      Serial.print("From : ");
+      Serial.println(phone);  
+      Serial.print("Datetime: ");
+      Serial.println(datetime);        
+      Serial.print("Recieved Message: ");
+      Serial.println(message); 
+
+      sendLocation(flat, flon);
+
+   }
+}
+
+//Function checks intervehicle distace and warns driver if they are too close to another car or obstacle. In the case pf a persieved collision system will call next od keen and manage any emergency
+void collision_system(float flat, float flon)
+{
+  
+   float distance = get_distance();
+   while (distance < middist){
+      digitalWrite(buzzer, 1);
+      //tone(buzzer, buzz_freq);
+      digitalWrite(redLED, 1);
+      if (distance < mindist){
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("Collision ");
+        lcd.setCursor(0,1);
+        lcd.print("Emrgncy Alerted");
+        if (set == 0){
+          //send emergerncy
+          sendEmergeny(flat, flon);
+          set = 1; //Sieze sending sms until system reboot
+          delay(5000);
+        }
+        distance = get_distance(); 
+        break;
+      }
+        else{
+          lcd.clear();
+          lcd.setCursor(0,0);
+          lcd.print("Collision Alert");
+          lcd.setCursor(0,1);
+          lcd.print("Evade Danger");
+        }
+        distance = get_distance();  
+   
+   }
+    //digitalWrite(buzzer, 0);
+
+    if (set == 0){
+      digitalWrite(buzzer, 0);
+      digitalWrite(redLED, 0); 
+      lcd.clear();
+      lcd.setCursor(4,0);
+      lcd.print("Drive ");
+      lcd.setCursor(4,1);
+      lcd.print("Safely");
+    }
+    else{
+      digitalWrite(buzzer, 1);
+      digitalWrite(redLED, 1);
+      lcd.clear();
+      lcd.setCursor(4,0);
+      lcd.print("If OK ");
+      lcd.setCursor(0,1);
+      lcd.print("Reboot System");      
+    }
+  
+  
+}
+
+//Calculates intervehicle distance and returns the distance
+float get_distance()
+{
+   
+  // Get the distance:
+  distance = sonar.ping_cm();//= duration*0.034/2;
+  if (distance <thresh ){
+    distance = MAX_DISTANCE;
+  }
+
+  Serial.println();
+  Serial.print("Distance is ");
+  Serial.println(distance);
+  
+  return distance;
+}
+
+
+//-------------------------------Functions From Example--------------------------------------------------------------------------------------------------------------------------------------
+
+static void smartdelay(unsigned long ms)
+{
+  unsigned long start = millis();
+  do 
+  {
+    while (ss.available())
+      gps.encode(ss.read());
+  } while (millis() - start < ms);
+}
+
+static void print_float(float val, float invalid, int len, int prec)
+{
+  if (val == invalid)
+  {
+    while (len-- > 1)
+      Serial.print('*');
+    Serial.print(' ');
+  }
+  else
+  {
+    Serial.print(val, prec);
+    int vi = abs((int)val);
+    int flen = prec + (val < 0.0 ? 2 : 1); // . and -
+    flen += vi >= 1000 ? 4 : vi >= 100 ? 3 : vi >= 10 ? 2 : 1;
+    for (int i=flen; i<len; ++i)
+      Serial.print(' ');
+  }
+  smartdelay(0);
+}
+
+static void print_int(unsigned long val, unsigned long invalid, int len)
+{
+  char sz[32];
+  if (val == invalid)
+    strcpy(sz, "*******");
+  else
+    sprintf(sz, "%ld", val);
+  sz[len] = 0;
+  for (int i=strlen(sz); i<len; ++i)
+    sz[i] = ' ';
+  if (len > 0) 
+    sz[len-1] = ' ';
+  Serial.print(sz);
+  smartdelay(0);
+}
+
+static void print_date(TinyGPS &gps)
+{
+  int year;
+  byte month, day, hour, minute, second, hundredths;
+  unsigned long age;
+  gps.crack_datetime(&year, &month, &day, &hour, &minute, &second, &hundredths, &age);
+  if (age == TinyGPS::GPS_INVALID_AGE)
+    Serial.print("********** ******** ");
+  else
+  {
+    char sz[32];
+    sprintf(sz, "%02d/%02d/%02d %02d:%02d:%02d ",
+        month, day, year, hour, minute, second);
+    Serial.print(sz);
+  }
+  print_int(age, TinyGPS::GPS_INVALID_AGE, 5);
+  smartdelay(0);
+}
+
+static void print_str(const char *str, int len)
+{
+  int slen = strlen(str);
+  for (int i=0; i<len; ++i)
+    Serial.print(i<slen ? str[i] : ' ');
+  smartdelay(0);
+}
