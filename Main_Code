@@ -74,11 +74,12 @@ void setup()
   pinMode(setLED, OUTPUT);
   
   //************************ Initialize Serials *****************************
+     //Baude rate is at 9600 for both
   Serial.begin(9600);
   ss.begin(9600);
 
   
-  //************************ Initialize LCD *************************************
+  //************************ Initialize LCD ************************************
   lcd.init(); 
   lcd.backlight();
   lcd.setCursor(0,0);
